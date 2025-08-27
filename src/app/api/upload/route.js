@@ -163,18 +163,14 @@
 //   }
 // }
 
-import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir } from 'fs/promises';
-import path from 'path';
-
-// --- Core Imports ---
+import { NextResponse } from 'next/server';
 import { Pinecone } from "@pinecone-database/pinecone";
 import { PineconeStore } from "@langchain/pinecone";
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import "dotenv/config";
 
-// --- Document Loader Imports ---
+// Document Loader Imports
 import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { TextLoader } from "langchain/document_loaders/fs/text";
 import { SRTLoader } from "@langchain/community/document_loaders/fs/srt";
@@ -184,87 +180,41 @@ import { DocxLoader } from "@langchain/community/document_loaders/fs/docx";
 // --- CONFIGURATION ---
 const PINECONE_INDEX_NAME = process.env.PINECONE_INDEX_NAME;
 
-const ALLOWED_FILE_TYPES = {
-  'application/pdf': { category: 'document' },
-  'text/plain': { category: 'text' },
-  'text/csv': { category: 'data' },
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': { category: 'document' },
-  'application/json': { category: 'data' },
-  'text/vtt': { category: 'text' },
-  'application/x-subrip': { category: 'text' },
-};
-
-// --- HELPER FUNCTIONS ---
+// --- HELPER FUNCTION ---
 
 /**
- * Dynamically selects a document loader based on the file extension.
+ * Dynamically selects a document loader based on the file type.
+ * This now takes the file Blob directly.
  */
-function getDocumentLoader(filePath) {
-  const extension = path.extname(filePath).toLowerCase();
-  console.log(`[Loader] Getting loader for extension: ${extension}`);
-  switch (extension) {
-    case ".pdf":
-      return new PDFLoader(filePath);
-    case ".txt":
-    case ".md":
-    case ".json":
-    case ".vtt":
-      return new TextLoader(filePath);
-    case ".srt":
-      return new SRTLoader(filePath);
-    case ".csv":
-      return new CSVLoader(filePath);
-    case ".docx":
-      return new DocxLoader(filePath);
+function getDocumentLoader(file) {
+  const fileType = file.type;
+  const fileName = file.name;
+  const extension = fileName.split('.').pop().toLowerCase();
+
+  console.log(`[Loader] Getting loader for file type: ${fileType}, extension: ${extension}`);
+
+  // We check MIME type first, then fall back to extension
+  switch (fileType) {
+    case "application/pdf":
+      return new PDFLoader(file);
+    case "text/plain":
+    case "text/markdown":
+    case "application/json":
+    case "text/vtt":
+      return new TextLoader(file);
+    case "text/csv":
+      return new CSVLoader(file);
+    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+      return new DocxLoader(file);
+    case "application/x-subrip":
+      return new SRTLoader(file);
     default:
-      console.log(`[Loader] No document loader for extension '${extension}', skipping embedding.`);
+      // Fallback for cases where MIME type is generic (like 'application/octet-stream')
+      if (extension === 'docx') return new DocxLoader(file);
+      if (extension === 'srt') return new SRTLoader(file);
+      if (['txt', 'md', 'json', 'vtt'].includes(extension)) return new TextLoader(file);
+      console.log(`[Loader] No specific loader for type '${fileType}' or extension '${extension}'.`);
       return null;
-  }
-}
-
-/**
- * Processes a file, generates embeddings, and stores them in Pinecone.
- */
-async function generateEmbeddingsForFile(filePath, originalFilename) {
-  try {
-    console.log(`\n--- [Embedding] Starting for: ${originalFilename} ---`);
-    const loader = getDocumentLoader(filePath);
-    if (!loader) return;
-
-    const rawDocs = await loader.load();
-    if (rawDocs.length === 0) {
-      console.log("[Embedding] ⚠️ No content found in the document. Skipping.");
-      return;
-    }
-
-    // Add original filename to metadata for each document chunk
-    rawDocs.forEach(doc => {
-      doc.metadata = { ...doc.metadata, source: originalFilename };
-    });
-
-    const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
-    const docs = await splitter.splitDocuments(rawDocs);
-
-    const embeddings = new GoogleGenerativeAIEmbeddings({
-      apiKey: process.env.GOOGLE_API_KEY,
-      model: "embedding-001",
-    });
-
-    // --- Pinecone Client Initialization ---
-    console.log("[Pinecone] Initializing client and connecting to index...");
-    const pinecone = new Pinecone();
-    const pineconeIndex = pinecone.index(PINECONE_INDEX_NAME);
-    console.log("[Pinecone] Index connection successful.");
-
-    // --- Storing documents in Pinecone ---
-    await PineconeStore.fromDocuments(docs, embeddings, {
-        pineconeIndex,
-        maxConcurrency: 5, // Batching requests for faster indexing
-    });
-
-    console.log(`--- [Embedding] ✅ Finished. Stored ${docs.length} chunks for: ${originalFilename} ---\n`);
-  } catch (error) {
-    console.error(`--- [Embedding] ❌ Error processing ${filePath}:`, error);
   }
 }
 
@@ -279,38 +229,55 @@ export async function POST(request) {
       return NextResponse.json({ success: false, error: 'No file provided' }, { status: 400 });
     }
 
-    const uploadDir = path.join(process.cwd(), 'uploads');
-    await mkdir(uploadDir, { recursive: true });
+    // --- In-Memory Processing Logic ---
+    console.log(`\n--- [Embedding] Starting for: ${file.name} ---`);
+    const loader = getDocumentLoader(file);
+    if (!loader) {
+        return NextResponse.json({ success: false, error: `Unsupported file type: ${file.type || file.name.split('.').pop()}` }, { status: 400 });
+    }
 
-    const sanitizedOriginalName = file.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1E9)}`;
-    const filename = `${uniqueSuffix}-${sanitizedOriginalName}`;
-    const filepath = path.join(uploadDir, filename);
+    const rawDocs = await loader.load();
+    if (rawDocs.length === 0) {
+      console.log("[Embedding] ⚠️ No content found in the document.");
+      return NextResponse.json({ success: true, message: 'File processed, but no content was found to embed.' });
+    }
 
-    const bytes = await file.arrayBuffer();
-    const buffer = Buffer.from(bytes);
-    await writeFile(filepath, buffer);
-
-    // Asynchronously generate embeddings without blocking the client's response
-    generateEmbeddingsForFile(filepath, file.name).catch(err => {
-        console.error("[Embedding] Background process failed:", err);
+    // Add original filename to metadata for each document chunk
+    rawDocs.forEach(doc => {
+      doc.metadata = { ...doc.metadata, source: file.name };
     });
+
+    const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
+    const docs = await splitter.splitDocuments(rawDocs);
+
+    const embeddings = new GoogleGenerativeAIEmbeddings({
+      apiKey: process.env.GOOGLE_API_KEY,
+      model: "embedding-001",
+    });
+
+    // Initialize Pinecone client and index
+    const pinecone = new Pinecone();
+    const pineconeIndex = pinecone.index(PINECONE_INDEX_NAME);
+
+    // Store documents in Pinecone
+    await PineconeStore.fromDocuments(docs, embeddings, {
+        pineconeIndex,
+        maxConcurrency: 5,
+    });
+
+    console.log(`--- [Embedding] ✅ Finished. Stored ${docs.length} chunks for: ${file.name} ---\n`);
 
     return NextResponse.json({
       success: true,
-      message: 'File uploaded. Embedding process initiated in the background.',
-      file: { filename: file.name }
-    }, { status: 200 });
+      message: `Successfully embedded ${docs.length} chunks from ${file.name}.`,
+    });
 
   } catch (error) {
     console.error('[Upload Error]', error);
-    return NextResponse.json({ success: false, error: 'File upload failed due to a server error' }, { status: 500 });
+    // Vercel logs the error object, so we can return a user-friendly message
+    return NextResponse.json({ success: false, error: 'An error occurred during embedding.' }, { status: 500 });
   }
 }
-
-
-
-
 
 
 
