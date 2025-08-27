@@ -275,7 +275,7 @@ export async function POST(request) {
   } catch (error) {
     console.error('[Upload Error]', error);
     // Vercel logs the error object, so we can return a user-friendly message
-    return NextResponse.json({ success: false, error: 'An error occurred during embedding.' }, { status: 500 });
+    return NextResponse.json({ success: false, error: 'An error occurred during embedding.', details: error }, { status: 500 });
   }
 }
 
