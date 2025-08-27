@@ -1,58 +1,178 @@
+// import { NextResponse } from 'next/server';
+// import { GoogleGenerativeAI } from "@google/generative-ai";
+// import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
+// import { QdrantVectorStore } from "@langchain/qdrant";
+// import { QdrantClient } from "@qdrant/js-client-rest";
+// import "dotenv/config";
+
+// // --- CONFIGURATION ---
+// const QDRANT_URL = process.env.QDRANT_URL || "http://localhost:6333";
+// const QDRANT_COLLECTION_NAME = "notebooklm-rag";
+
+// // Initialize the Google Generative AI client
+// const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+// const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+// // --- HELPER FUNCTIONS ---
+
+// /**
+//  * Improves the user's query for better vector search results.
+//  * @param {string} query - The original user query.
+//  * @returns {Promise<string>} The improved query.
+//  */
+
+// async function improveQuery(query) {
+//     const prompt = `You are a query optimization expert. Your task is to rewrite the following user query to be more effective for a vector database search. Focus on keywords, clarity, and intent. Return only the rewritten query.
+    
+//     Original Query: "${query}"
+    
+//     Rewritten Query:`;
+
+//     try {
+//         const result = await model.generateContent(prompt);
+//         const response = await result.response;
+//         return response.text().trim();
+//     } catch (error) {
+//         console.error("Error improving query, falling back to original:", error);
+//         return query; // Fallback to the original query on error
+//     }
+// }
+
+
+// function getUniqueDocuments(documents) {
+//     const uniqueDocs = new Map();
+//     documents.forEach(doc => {
+//         // Use pageContent as the key to identify and remove duplicates
+//         if (!uniqueDocs.has(doc.pageContent)) {
+//             uniqueDocs.set(doc.pageContent, doc);
+//         }
+//     });
+//     return Array.from(uniqueDocs.values());
+// }
+
+
+// // --- API ROUTE HANDLER ---
+
+// export async function POST(request) {
+//     try {
+//         const { messages } = await request.json();
+//         const userQuery = messages[messages.length - 1].content;
+
+//         if (!userQuery) {
+//             return NextResponse.json({ error: "No query provided" }, { status: 400 });
+//         }
+
+//         console.log(`[Chat] Received original query: "${userQuery}"`);
+
+//         // 1. Initialize Embeddings and Vector Store
+//         const embeddings = new GoogleGenerativeAIEmbeddings({
+//             apiKey: process.env.GOOGLE_API_KEY,
+//             model: "embedding-001",
+//         });
+        
+//         const client = new QdrantClient({ url: QDRANT_URL });
+//         const vectorStore = new QdrantVectorStore(embeddings, {
+//             client,
+//             collectionName: QDRANT_COLLECTION_NAME,
+//         });
+
+//         // 2. Improve the user's query
+//         const improvedQuery = await improveQuery(userQuery);
+//         console.log(`[Chat] Improved query: "${improvedQuery}"`);
+
+//         // 3. Perform parallel similarity searches
+//         const [originalResults, improvedResults] = await Promise.all([
+//             vectorStore.similaritySearch(userQuery, 4),
+//             vectorStore.similaritySearch(improvedQuery, 4)
+//         ]);
+//         console.log(`[Chat] Found ${originalResults.length} original results and ${improvedResults.length} improved results.`);
+
+//         // 4. Combine and de-duplicate results
+//         const allResults = [...originalResults, ...improvedResults];
+//         const uniqueDocs = getUniqueDocuments(allResults);
+//         console.log(`[Chat] Combined to ${uniqueDocs.length} unique documents.`);
+        
+//         // 5. Create the context for the final answer
+//         const context = uniqueDocs.map(doc => 
+//             `Source: ${doc.metadata.source}\nContent: ${doc.pageContent}`
+//         ).join("\n\n---\n\n");
+
+//         // 6. Generate the final response
+//         const finalPrompt = `You are a helpful AI assistant for a project called NotebookLM. Your task is to answer the user's question based *only* on the provided context from their uploaded documents.
+
+//         - If the context contains the answer, provide a clear and concise response, citing the source document when possible (e.g., "According to 'document.pdf'...").
+//         - If the context does not contain enough information to answer the question, state that you couldn't find the answer in the provided documents.
+//         - Do not use any external knowledge.
+        
+//         CONTEXT FROM DOCUMENTS:
+//         ${context}
+        
+//         USER'S QUESTION:
+//         ${userQuery}
+        
+//         ANSWER:`;
+        
+//         const result = await model.generateContent(finalPrompt);
+//         const response = await result.response;
+//         const finalAnswer = response.text();
+
+//         return NextResponse.json({
+//             id: `asst-${Date.now()}`,
+//             content: finalAnswer,
+//         });
+
+//     } catch (error) {
+//         console.error('[Chat Error]', error);
+//         return NextResponse.json({ error: "An error occurred while processing your request." }, { status: 500 });
+//     }
+// }
+
+
 import { NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
-import { QdrantVectorStore } from "@langchain/qdrant";
-import { QdrantClient } from "@qdrant/js-client-rest";
+import { Pinecone } from "@pinecone-database/pinecone";
+import { PineconeStore } from "@langchain/pinecone";
 import "dotenv/config";
 
 // --- CONFIGURATION ---
-const QDRANT_URL = process.env.QDRANT_URL || "http://localhost:6333";
-const QDRANT_COLLECTION_NAME = "notebooklm-rag";
+const PINECONE_INDEX_NAME = process.env.PINECONE_INDEX_NAME;
 
-// Initialize the Google Generative AI client
+// Initialize Google Generative AI client for chat
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const generationModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 // --- HELPER FUNCTIONS ---
 
 /**
- * Improves the user's query for better vector search results.
- * @param {string} query - The original user query.
- * @returns {Promise<string>} The improved query.
+ * Rewrites the user's query for better vector search results.
  */
 async function improveQuery(query) {
-    const prompt = `You are a query optimization expert. Your task is to rewrite the following user query to be more effective for a vector database search. Focus on keywords, clarity, and intent. Return only the rewritten query.
-    
+    const prompt = `You are a query optimization expert. Rewrite the following user query to be more effective for a vector database search by focusing on keywords, clarity, and intent. Return only the rewritten query.
     Original Query: "${query}"
-    
     Rewritten Query:`;
 
     try {
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        return response.text().trim();
+        const result = await generationModel.generateContent(prompt);
+        return (await result.response).text().trim();
     } catch (error) {
         console.error("Error improving query, falling back to original:", error);
-        return query; // Fallback to the original query on error
+        return query;
     }
 }
 
 /**
- * Removes duplicate documents from a list based on their page content.
- * @param {Array<Document>} documents - A list of documents.
- * @returns {Array<Document>} A list of unique documents.
+ * Removes duplicate documents from a list based on page content.
  */
 function getUniqueDocuments(documents) {
     const uniqueDocs = new Map();
     documents.forEach(doc => {
-        // Use pageContent as the key to identify and remove duplicates
         if (!uniqueDocs.has(doc.pageContent)) {
             uniqueDocs.set(doc.pageContent, doc);
         }
     });
     return Array.from(uniqueDocs.values());
 }
-
 
 // --- API ROUTE HANDLER ---
 
@@ -64,60 +184,59 @@ export async function POST(request) {
         if (!userQuery) {
             return NextResponse.json({ error: "No query provided" }, { status: 400 });
         }
+        console.log(`[Chat] Received query: "${userQuery}"`);
 
-        console.log(`[Chat] Received original query: "${userQuery}"`);
-
-        // 1. Initialize Embeddings and Vector Store
+        // 1. Initialize Embeddings and Pinecone Client
         const embeddings = new GoogleGenerativeAIEmbeddings({
             apiKey: process.env.GOOGLE_API_KEY,
             model: "embedding-001",
         });
-        
-        const client = new QdrantClient({ url: QDRANT_URL });
-        const vectorStore = new QdrantVectorStore(embeddings, {
-            client,
-            collectionName: QDRANT_COLLECTION_NAME,
+
+        const pinecone = new Pinecone();
+        const pineconeIndex = pinecone.index(PINECONE_INDEX_NAME);
+
+        // 2. Initialize Vector Store from your existing Pinecone index
+        const vectorStore = await PineconeStore.fromExistingIndex(embeddings, {
+            pineconeIndex,
         });
 
-        // 2. Improve the user's query
+        // 3. Improve the user's query
         const improvedQuery = await improveQuery(userQuery);
         console.log(`[Chat] Improved query: "${improvedQuery}"`);
 
-        // 3. Perform parallel similarity searches
+        // 4. Perform parallel similarity searches with both queries
         const [originalResults, improvedResults] = await Promise.all([
             vectorStore.similaritySearch(userQuery, 4),
             vectorStore.similaritySearch(improvedQuery, 4)
         ]);
-        console.log(`[Chat] Found ${originalResults.length} original results and ${improvedResults.length} improved results.`);
 
-        // 4. Combine and de-duplicate results
+        // 5. Combine and de-duplicate the retrieved documents
         const allResults = [...originalResults, ...improvedResults];
         const uniqueDocs = getUniqueDocuments(allResults);
-        console.log(`[Chat] Combined to ${uniqueDocs.length} unique documents.`);
-        
-        // 5. Create the context for the final answer
-        const context = uniqueDocs.map(doc => 
+        console.log(`[Chat] Found ${uniqueDocs.length} unique documents.`);
+
+        // 6. Create the context for the final answer synthesis
+        const context = uniqueDocs.map(doc =>
             `Source: ${doc.metadata.source}\nContent: ${doc.pageContent}`
         ).join("\n\n---\n\n");
 
-        // 6. Generate the final response
+        // 7. Generate the final response using the retrieved context
         const finalPrompt = `You are a helpful AI assistant for a project called NotebookLM. Your task is to answer the user's question based *only* on the provided context from their uploaded documents.
 
         - If the context contains the answer, provide a clear and concise response, citing the source document when possible (e.g., "According to 'document.pdf'...").
-        - If the context does not contain enough information to answer the question, state that you couldn't find the answer in the provided documents.
+        - If the context does not contain enough information, state that you couldn't find the answer in the provided documents.
         - Do not use any external knowledge.
-        
+
         CONTEXT FROM DOCUMENTS:
         ${context}
-        
+
         USER'S QUESTION:
         ${userQuery}
-        
+
         ANSWER:`;
-        
-        const result = await model.generateContent(finalPrompt);
-        const response = await result.response;
-        const finalAnswer = response.text();
+
+        const result = await generationModel.generateContent(finalPrompt);
+        const finalAnswer = (await result.response).text();
 
         return NextResponse.json({
             id: `asst-${Date.now()}`,
@@ -129,9 +248,6 @@ export async function POST(request) {
         return NextResponse.json({ error: "An error occurred while processing your request." }, { status: 500 });
     }
 }
-
-
-
 
 
 

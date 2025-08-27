@@ -1,41 +1,203 @@
+// import { NextRequest, NextResponse } from 'next/server';
+// import { writeFile, mkdir } from 'fs/promises';
+// import path from 'path';
+
+// // LangChain & Qdrant Imports
+// import { QdrantVectorStore } from "@langchain/qdrant";
+// import { QdrantClient } from "@qdrant/js-client-rest";
+// import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
+// import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+// import { TextLoader } from "langchain/document_loaders/fs/text";
+// import { SRTLoader } from "@langchain/community/document_loaders/fs/srt"; // <-- ADDED: SRT Loader
+// import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
+// import { DocxLoader } from "@langchain/community/document_loaders/fs/docx";
+// import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+// import "dotenv/config";
+
+// // --- CONFIGURATION ---
+
+// const QDRANT_URL = process.env.QDRANT_URL || "http://localhost:6333";
+// const QDRANT_COLLECTION_NAME = "notebooklm-rag";
+
+// // UPDATED: Added srt and vtt types
+// const ALLOWED_FILE_TYPES = {
+//   'application/pdf': { maxSize: 25 * 1024 * 1024, category: 'document' },
+//   'text/plain': { maxSize: 5 * 1024 * 1024, category: 'text' },
+//   'text/csv': { maxSize: 50 * 1024 * 1024, category: 'data' },
+//   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': { maxSize: 25 * 1024 * 1024, category: 'document' },
+//   'application/json': { maxSize: 25 * 1024 * 1024, category: 'data' },
+//   'text/vtt': { maxSize: 5 * 1024 * 1024, category: 'text' }, // <-- ADDED
+//   'application/x-subrip': { maxSize: 5 * 1024 * 1024, category: 'text' }, // <-- ADDED for .srt
+// };
+
+
+// // --- EMBEDDING LOGIC ---
+
+// /**
+//  * Dynamically selects a document loader based on the file extension.
+//  * This function is now updated to handle .vtt and .srt files.
+//  */
+// function getDocumentLoader(filePath) {
+//   const extension = path.extname(filePath).toLowerCase();
+//   console.log(`[Loader] Getting loader for extension: ${extension}`);
+//   switch (extension) {
+//     case ".pdf":
+//       return new PDFLoader(filePath);
+//     case ".txt":
+//     case ".md":
+//     case ".json":
+//     case ".vtt": // <-- ADDED: VTT files are plain text
+//       return new TextLoader(filePath);
+//     case ".srt": // <-- ADDED: Use the dedicated SRTLoader
+//       return new SRTLoader(filePath);
+//     case ".csv":
+//       return new CSVLoader(filePath);
+//     case ".docx":
+//       return new DocxLoader(filePath);
+//     default:
+//       console.log(`[Loader] No document loader for extension '${extension}', skipping embedding.`);
+//       return null;
+//   }
+// }
+
+// /**
+//  * Processes a file, generates embeddings, and stores them in Qdrant.
+//  */
+// async function generateEmbeddingsForFile(filePath, originalFilename) {
+//   try {
+//     console.log(`\n--- [Embedding] Starting processing for: ${filePath} ---`);
+//     const loader = getDocumentLoader(filePath);
+    
+//     if (!loader) return;
+
+//     const rawDocs = await loader.load();
+//     if (rawDocs.length === 0) {
+//       console.log("[Embedding] ⚠️ No content found in the document. Skipping.");
+//       return;
+//     }
+    
+//     // Add original filename to metadata for each document
+//     rawDocs.forEach(doc => {
+//       doc.metadata = { ...doc.metadata, source: originalFilename };
+//     });
+
+//     const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
+//     const docs = await splitter.splitDocuments(rawDocs);
+    
+//     const embeddings = new GoogleGenerativeAIEmbeddings({
+//       apiKey: process.env.GOOGLE_API_KEY,
+//       model: "embedding-001",
+//     });
+
+//     const client = new QdrantClient({ url: QDRANT_URL });
+
+//     const collections = await client.getCollections();
+//     const collectionExists = collections.collections.some(c => c.name === QDRANT_COLLECTION_NAME);
+    
+//     if (!collectionExists) {
+//       console.log(`[Qdrant] Collection '${QDRANT_COLLECTION_NAME}' not found. Creating...`);
+//       await client.createCollection(QDRANT_COLLECTION_NAME, {
+//           vectors: { size: 768, distance: "Cosine" }, // embedding-001 model has 768 dimensions
+//       });
+//       console.log(`[Qdrant] Collection created.`);
+//     }
+
+//     await QdrantVectorStore.fromDocuments(docs, embeddings, {
+//       client,
+//       collectionName: QDRANT_COLLECTION_NAME,
+//     });
+
+//     console.log(`--- [Embedding] ✅ Finished. Stored ${docs.length} chunks for: ${originalFilename} ---\n`);
+//   } catch (error) {
+//     console.error(`--- [Embedding] ❌ Error processing ${filePath}:`, error);
+//   }
+// }
+
+
+// // --- API ROUTE HANDLER ---
+
+// export async function POST(request) {
+//   try {
+//     const formData = await request.formData();
+//     const file = formData.get('file');
+
+//     if (!file) {
+//       return NextResponse.json({ success: false, error: 'No file provided' }, { status: 400 });
+//     }
+    
+//     // NOTE: The browser might send .srt as 'application/x-subrip' or 'text/plain'.
+//     // We will rely on file extension in getDocumentLoader for robustness.
+//     const fileType = file.type || 'application/octet-stream';
+
+//     const uploadDir = path.join(process.cwd(), 'uploads');
+//     await mkdir(uploadDir, { recursive: true });
+
+//     const sanitizedOriginalName = file.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+//     const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+//     const filename = `${uniqueSuffix}-${sanitizedOriginalName}`;
+//     const filepath = path.join(uploadDir, filename);
+
+//     const bytes = await file.arrayBuffer();
+//     const buffer = Buffer.from(bytes);
+//     await writeFile(filepath, buffer);
+
+//     // Asynchronously generate embeddings, don't block the response
+//     generateEmbeddingsForFile(filepath, file.name).catch(err => {
+//         console.error("[Embedding] Background process failed:", err);
+//     });
+
+//     console.log('File uploaded successfully:', { filename, path: filepath });
+    
+//     return NextResponse.json({
+//       success: true,
+//       message: 'File uploaded successfully. Embedding process initiated.',
+//       file: {
+//         filename: file.name,
+//         path: `/uploads/${filename}`, // A simplified path for display
+//       }
+//     }, { status: 200 });
+
+//   } catch (error) {
+//     console.error('[Upload Error]', error);
+//     return NextResponse.json({ success: false, error: 'File upload failed due to a server error' }, { status: 500 });
+//   }
+// }
+
 import { NextRequest, NextResponse } from 'next/server';
 import { writeFile, mkdir } from 'fs/promises';
 import path from 'path';
 
-// LangChain & Qdrant Imports
-import { QdrantVectorStore } from "@langchain/qdrant";
-import { QdrantClient } from "@qdrant/js-client-rest";
+// --- Core Imports ---
+import { Pinecone } from "@pinecone-database/pinecone";
+import { PineconeStore } from "@langchain/pinecone";
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-import { TextLoader } from "langchain/document_loaders/fs/text";
-import { SRTLoader } from "@langchain/community/document_loaders/fs/srt"; // <-- ADDED: SRT Loader
-import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
-import { DocxLoader } from "@langchain/community/document_loaders/fs/docx";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import "dotenv/config";
 
+// --- Document Loader Imports ---
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { TextLoader } from "langchain/document_loaders/fs/text";
+import { SRTLoader } from "@langchain/community/document_loaders/fs/srt";
+import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
+import { DocxLoader } from "@langchain/community/document_loaders/fs/docx";
+
 // --- CONFIGURATION ---
+const PINECONE_INDEX_NAME = process.env.PINECONE_INDEX_NAME;
 
-const QDRANT_URL = process.env.QDRANT_URL || "http://localhost:6333";
-const QDRANT_COLLECTION_NAME = "notebooklm-rag";
-
-// UPDATED: Added srt and vtt types
 const ALLOWED_FILE_TYPES = {
-  'application/pdf': { maxSize: 25 * 1024 * 1024, category: 'document' },
-  'text/plain': { maxSize: 5 * 1024 * 1024, category: 'text' },
-  'text/csv': { maxSize: 50 * 1024 * 1024, category: 'data' },
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': { maxSize: 25 * 1024 * 1024, category: 'document' },
-  'application/json': { maxSize: 25 * 1024 * 1024, category: 'data' },
-  'text/vtt': { maxSize: 5 * 1024 * 1024, category: 'text' }, // <-- ADDED
-  'application/x-subrip': { maxSize: 5 * 1024 * 1024, category: 'text' }, // <-- ADDED for .srt
+  'application/pdf': { category: 'document' },
+  'text/plain': { category: 'text' },
+  'text/csv': { category: 'data' },
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': { category: 'document' },
+  'application/json': { category: 'data' },
+  'text/vtt': { category: 'text' },
+  'application/x-subrip': { category: 'text' },
 };
 
-
-// --- EMBEDDING LOGIC ---
+// --- HELPER FUNCTIONS ---
 
 /**
  * Dynamically selects a document loader based on the file extension.
- * This function is now updated to handle .vtt and .srt files.
  */
 function getDocumentLoader(filePath) {
   const extension = path.extname(filePath).toLowerCase();
@@ -46,9 +208,9 @@ function getDocumentLoader(filePath) {
     case ".txt":
     case ".md":
     case ".json":
-    case ".vtt": // <-- ADDED: VTT files are plain text
+    case ".vtt":
       return new TextLoader(filePath);
-    case ".srt": // <-- ADDED: Use the dedicated SRTLoader
+    case ".srt":
       return new SRTLoader(filePath);
     case ".csv":
       return new CSVLoader(filePath);
@@ -61,13 +223,12 @@ function getDocumentLoader(filePath) {
 }
 
 /**
- * Processes a file, generates embeddings, and stores them in Qdrant.
+ * Processes a file, generates embeddings, and stores them in Pinecone.
  */
 async function generateEmbeddingsForFile(filePath, originalFilename) {
   try {
-    console.log(`\n--- [Embedding] Starting processing for: ${filePath} ---`);
+    console.log(`\n--- [Embedding] Starting for: ${originalFilename} ---`);
     const loader = getDocumentLoader(filePath);
-    
     if (!loader) return;
 
     const rawDocs = await loader.load();
@@ -75,36 +236,30 @@ async function generateEmbeddingsForFile(filePath, originalFilename) {
       console.log("[Embedding] ⚠️ No content found in the document. Skipping.");
       return;
     }
-    
-    // Add original filename to metadata for each document
+
+    // Add original filename to metadata for each document chunk
     rawDocs.forEach(doc => {
       doc.metadata = { ...doc.metadata, source: originalFilename };
     });
 
     const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
     const docs = await splitter.splitDocuments(rawDocs);
-    
+
     const embeddings = new GoogleGenerativeAIEmbeddings({
       apiKey: process.env.GOOGLE_API_KEY,
       model: "embedding-001",
     });
 
-    const client = new QdrantClient({ url: QDRANT_URL });
+    // --- Pinecone Client Initialization ---
+    console.log("[Pinecone] Initializing client and connecting to index...");
+    const pinecone = new Pinecone();
+    const pineconeIndex = pinecone.index(PINECONE_INDEX_NAME);
+    console.log("[Pinecone] Index connection successful.");
 
-    const collections = await client.getCollections();
-    const collectionExists = collections.collections.some(c => c.name === QDRANT_COLLECTION_NAME);
-    
-    if (!collectionExists) {
-      console.log(`[Qdrant] Collection '${QDRANT_COLLECTION_NAME}' not found. Creating...`);
-      await client.createCollection(QDRANT_COLLECTION_NAME, {
-          vectors: { size: 768, distance: "Cosine" }, // embedding-001 model has 768 dimensions
-      });
-      console.log(`[Qdrant] Collection created.`);
-    }
-
-    await QdrantVectorStore.fromDocuments(docs, embeddings, {
-      client,
-      collectionName: QDRANT_COLLECTION_NAME,
+    // --- Storing documents in Pinecone ---
+    await PineconeStore.fromDocuments(docs, embeddings, {
+        pineconeIndex,
+        maxConcurrency: 5, // Batching requests for faster indexing
     });
 
     console.log(`--- [Embedding] ✅ Finished. Stored ${docs.length} chunks for: ${originalFilename} ---\n`);
@@ -112,7 +267,6 @@ async function generateEmbeddingsForFile(filePath, originalFilename) {
     console.error(`--- [Embedding] ❌ Error processing ${filePath}:`, error);
   }
 }
-
 
 // --- API ROUTE HANDLER ---
 
@@ -124,10 +278,6 @@ export async function POST(request) {
     if (!file) {
       return NextResponse.json({ success: false, error: 'No file provided' }, { status: 400 });
     }
-    
-    // NOTE: The browser might send .srt as 'application/x-subrip' or 'text/plain'.
-    // We will rely on file extension in getDocumentLoader for robustness.
-    const fileType = file.type || 'application/octet-stream';
 
     const uploadDir = path.join(process.cwd(), 'uploads');
     await mkdir(uploadDir, { recursive: true });
@@ -141,20 +291,15 @@ export async function POST(request) {
     const buffer = Buffer.from(bytes);
     await writeFile(filepath, buffer);
 
-    // Asynchronously generate embeddings, don't block the response
+    // Asynchronously generate embeddings without blocking the client's response
     generateEmbeddingsForFile(filepath, file.name).catch(err => {
         console.error("[Embedding] Background process failed:", err);
     });
 
-    console.log('File uploaded successfully:', { filename, path: filepath });
-    
     return NextResponse.json({
       success: true,
-      message: 'File uploaded successfully. Embedding process initiated.',
-      file: {
-        filename: file.name,
-        path: `/uploads/${filename}`, // A simplified path for display
-      }
+      message: 'File uploaded. Embedding process initiated in the background.',
+      file: { filename: file.name }
     }, { status: 200 });
 
   } catch (error) {
@@ -162,8 +307,6 @@ export async function POST(request) {
     return NextResponse.json({ success: false, error: 'File upload failed due to a server error' }, { status: 500 });
   }
 }
-
-
 
 
 
